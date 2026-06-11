@@ -5,6 +5,7 @@ use crate::auth::google::GoogleVerifier;
 use crate::config::Config;
 use crate::db::Db;
 use crate::pinning::client::PinningClient;
+use crate::push::fcm::FcmClient;
 use crate::ws::hub::Hub;
 use std::sync::Arc;
 
@@ -15,5 +16,6 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub google: Arc<Option<GoogleVerifier>>,
     pub pinner: Arc<Option<PinningClient>>,
+    pub fcm: Arc<Option<FcmClient>>,
     pub limiter: Arc<RateLimiter>,
 }

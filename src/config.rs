@@ -24,6 +24,15 @@ pub struct Config {
     pub refresh_ttl_secs: i64,
     /// Auth-surface rate limit (per IP per minute) — spec §15.
     pub auth_rate_per_min: u32,
+    /// Path to a Google Cloud service-account JSON key with the
+    /// `roles/firebase.messaging.admin` role. None = push worker idle.
+    pub fcm_service_account_path: Option<String>,
+    /// FCM HTTP v1 project id (the `project_id` field from the service
+    /// account JSON). The worker URL-builds as
+    /// `https://fcm.googleapis.com/v1/projects/{id}/messages:send`.
+    pub fcm_project_id: Option<String>,
+    /// Push-worker poll interval. 5s is a good default for ~10k users.
+    pub push_worker_secs: u64,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -61,6 +70,9 @@ impl Config {
             access_ttl_secs: 15 * 60,
             refresh_ttl_secs: 30 * 24 * 3600,
             auth_rate_per_min: env_or("AUTH_RATE_PER_MIN", "10").parse().unwrap_or(10),
+            fcm_service_account_path: std::env::var("FCM_SERVICE_ACCOUNT_PATH").ok(),
+            fcm_project_id: std::env::var("FCM_PROJECT_ID").ok(),
+            push_worker_secs: env_or("PUSH_WORKER_SECS", "5").parse().unwrap_or(5),
         }
     }
 

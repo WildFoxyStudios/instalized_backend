@@ -33,6 +33,9 @@ pub async fn spawn(modify: impl FnOnce(&mut Config)) -> TestApp {
         access_ttl_secs: 900,
         refresh_ttl_secs: 3600,
         auth_rate_per_min: 1000, // generous default so unrelated tests never trip it
+        fcm_service_account_path: None,
+        fcm_project_id: None,
+        push_worker_secs: 1,
     };
     modify(&mut cfg);
     let (app, state) = backend_rust::build(cfg).unwrap();
