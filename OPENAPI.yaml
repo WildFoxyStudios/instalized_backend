@@ -105,8 +105,12 @@ paths:
 
   /v1/auth/login:
     post:
-      tags: [auth]
-      summary: Email + password login
+      tags: [auth, totp]
+      summary: Email + password login (returns token pair OR a 2FA pending token)
+      description: |
+        If the account has 2FA enabled the response is `{ requires_2fa, pending_token, user_id }`
+        and no access token is issued. The client then calls `POST /v1/auth/2fa` with the
+        pending token and a 6-digit TOTP code (or a backup code) to receive the real pair.
       security: []
       requestBody:
         required: true
@@ -119,7 +123,11 @@ paths:
                 email: { type: string }
                 password: { type: string }
       responses:
-        "200": { $ref: "#/components/responses/TokenPair" }
+        "200":
+          description: token pair OR 2FA challenge
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/auth/google:
@@ -176,12 +184,111 @@ paths:
       responses:
         "200": { description: revoked, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
 
+  /v1/auth/2fa:
+    post:
+      tags: [auth, totp]
+      summary: Exchange a 2FA pending token + (TOTP code | backup code) for the real token pair
+      description: |
+        Called only when /v1/auth/login returned `{ requires_2fa: true, pending_token }`.
+        The pending token is a JWT with sub `2fa:pending:<uid>` and 10-minute TTL;
+        it cannot be used as a regular access token (the AuthUser extractor rejects it).
+        A consumed backup code is single-use; a wrong TOTP returns 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pending_token, code]
+              properties:
+                pending_token: { type: string, description: "From /v1/auth/login when 2FA is on" }
+                code: { type: string, description: "6-digit TOTP code OR XXXXX-XXXXX backup code" }
+      responses:
+        "200":
+          description: full token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/users/me:
     get:
       tags: [users]
       summary: Own profile
       responses:
         "200": { $ref: "#/components/responses/Profile" }
+
+  /v1/users/me/2fa:
+    get:
+      tags: [users, totp]
+      summary: 2FA status (TOTP enabled, verified-at, backup codes remaining)
+      responses:
+        "200":
+          description: status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totp_enabled: { type: boolean }
+                  verified_at: { type: integer, nullable: true, description: "epoch seconds; null until the user confirms" }
+                  backup_codes_remaining: { type: integer }
+
+  /v1/users/me/2fa/enable:
+    post:
+      tags: [users, totp]
+      summary: Begin 2FA setup (returns secret + otpauth URI + 10 backup codes; totp_enabled stays false until confirm)
+      responses:
+        "200":
+          description: setup bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string, description: "base32 (no padding) — type into your TOTP app" }
+                  otpauth_uri: { type: string, description: "otpauth:// URI; QR codes encode this" }
+                  backup_codes:
+                    type: array
+                    items: { type: string, example: "ABCDE-FGHJK" }
+                    minItems: 10
+                    maxItems: 10
+
+  /v1/users/me/2fa/confirm:
+    post:
+      tags: [users, totp]
+      summary: Verify the first 6-digit code from your TOTP app and activate 2FA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        "200": { description: enabled, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, totp_enabled: { type: boolean } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/users/me/2fa/disable:
+    post:
+      tags: [users, totp]
+      summary: Disable 2FA (requires the current password AND a fresh TOTP or backup code)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password: { type: string, format: password }
+                code: { type: string, description: "6-digit TOTP code OR a backup code" }
+      responses:
+        "200": { description: disabled, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, totp_enabled: { type: boolean } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     patch:
       tags: [users]
@@ -200,6 +307,55 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Profile" }
         "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/users/me/privacy:
+    patch:
+      tags: [users, privacy]
+      summary: Update private-account / activity-status / mentions / replies flags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                is_private: { type: boolean }
+                show_activity: { type: boolean }
+                allow_mentions: { type: boolean }
+                allow_story_replies: { type: boolean }
+      responses:
+        "200":
+          description: updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  is_private: { type: boolean }
+                  show_activity: { type: boolean }
+                  allow_mentions: { type: boolean }
+                  allow_story_replies: { type: boolean }
+
+  /v1/users/me/notification-prefs:
+    post:
+      tags: [users, notifications]
+      summary: Update per-kind push preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pause_all: { type: boolean, description: "Master switch — disables all push" }
+                posts: { type: boolean, description: "Likes, comments, follows, mentions, tags" }
+                stories: { type: boolean, description: "Story + story-reply notifications" }
+                lives: { type: boolean, description: "Live-start notifications" }
+                dms: { type: boolean, description: "Direct messages" }
+                calls: { type: boolean, description: "Video / voice call events" }
+      responses:
+        "200": { description: stored, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
 
   /v1/users/{username}:
     get:
@@ -474,7 +630,14 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
       tags: [dm]
-      summary: Send a message (recipient also receives it over WS)
+      summary: Send a message (text, image, or voice)
+      description: |
+        `kind` defaults to `text`. For `image|video|reel` messages `media_cid` is
+        required and `thumb_cid/width/height` are recommended. For `voice` messages
+        `duration_ms` (1..=600000) and a `waveform` JSON array of small integer
+        samples (≤200) are required — the waveform lets the receiver render a
+        scrubber without decoding audio. The recipient also receives the
+        message over WS as `dm.new`.
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
         required: true
@@ -484,9 +647,19 @@ paths:
               type: object
               properties:
                 body: { type: string, maxLength: 4000 }
-                media_cid: { type: string }
+                media_cid: { type: string, description: "IPFS CID; required for non-text kinds" }
+                kind: { type: string, enum: [text, image, voice, video, reel], default: text }
+                duration_ms: { type: integer, minimum: 1, maximum: 600000, description: "Voice only" }
+                waveform:
+                  type: string
+                  description: "JSON-encoded array of i16 amplitude samples (≤200 entries); voice only"
+                  example: "[0,12,34,56,80,90,80,56,34,12,0]"
+                thumb_cid: { type: string, description: "Image/video poster (recommended)" }
+                width: { type: integer, description: "Image/video intrinsic width" }
+                height: { type: integer, description: "Image/video intrinsic height" }
       responses:
         "200": { description: sent, content: { application/json: { schema: { $ref: "#/components/schemas/DmMessage" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
   /v1/dm/threads/{id}/read:
@@ -648,9 +821,25 @@ paths:
               required: [platform, token]
               properties:
                 platform: { type: string, enum: [android, ios, web] }
-                token: { type: string }
+                token: { type: string, maxLength: 4096 }
       responses:
         "200": { description: stored, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+  /v1/push/unregister:
+    post:
+      tags: [notifications]
+      summary: Drop a push token (called on logout so the server doesn't keep ghosting notifications)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200": { description: dropped, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
 
   /v1/search/users:
     get:
@@ -929,6 +1118,30 @@ components:
         media_cid: { type: string, nullable: true }
         created_at: { type: integer, format: int64 }
         read_at: { type: integer, format: int64, nullable: true }
+        kind: { type: string, enum: [text, image, voice, video, reel], default: text }
+        duration_ms: { type: integer, nullable: true, description: "Voice only; epoch milliseconds" }
+        waveform: { type: string, nullable: true, description: "Voice only; JSON array of i16 samples" }
+        thumb_cid: { type: string, nullable: true }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+    TokenPair:
+      type: object
+      description: Returned by /v1/auth/{register,login,2fa,refresh}
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: access-token TTL in seconds }
+        user_id: { type: string }
+    LoginResponse:
+      oneOf:
+        - $ref: "#/components/schemas/TokenPair"
+        - type: object
+          description: "Account has 2FA on — caller must POST /v1/auth/2fa to complete"
+          properties:
+            requires_2fa: { type: boolean, enum: [true] }
+            pending_token: { type: string }
+            user_id: { type: string }
     LiveStream:
       type: object
       properties:
