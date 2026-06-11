@@ -4,7 +4,7 @@
 use crate::api::Page;
 use crate::auth::AuthUser;
 use crate::db::{new_id, now};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::ws::protocol;
 use axum::extract::{Query, State};
@@ -112,7 +112,7 @@ pub struct PushRegisterReq {
 pub async fn register_push(
     State(state): State<AppState>,
     AuthUser(me): AuthUser,
-    Json(req): Json<RegisterPushReq>,
+    Json(req): Json<PushRegisterReq>,
 ) -> AppResult<Json<Value>> {
     let token = req.token;
     if token.len() > 4096 {

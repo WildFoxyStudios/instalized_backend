@@ -29,6 +29,12 @@ impl FromRequestParts<AppState> for AuthUser {
             .strip_prefix("Bearer ")
             .ok_or_else(|| AppError::unauthorized("malformed authorization header"))?;
         let claims = jwt::verify(&state.cfg.jwt_secret, token)?;
+        // Pending 2FA tokens are scoped to /v1/auth/2fa and must not work as
+        // a regular access token. The `2fa:pending:` prefix is the marker; the
+        // /2fa endpoint strips it back to the real user id.
+        if claims.sub.starts_with("2fa:pending:") {
+            return Err(AppError::unauthorized("2fa pending token cannot be used here"));
+        }
         Ok(AuthUser(claims.sub))
     }
 }

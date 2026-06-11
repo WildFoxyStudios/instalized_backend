@@ -1,7 +1,7 @@
 //! /v1/posts/* — create (CID announcement), read, delete, likes, comments.
 //! Like/comment counters go through the write-batcher (manifesto #6).
 
-use crate::api::{post_from_row, validate_cid, Page, POST_COLS};
+use crate::api::{post_from_row, validate_cid, POST_COLS};
 use crate::auth::{AuthUser, MaybeUser};
 use crate::db::{new_id, now};
 use crate::error::{AppError, AppResult};
@@ -209,22 +209,19 @@ pub async fn comments_list(
     Path(post_id): Path<String>,
     Query(params): Query<CommentsPage>,
 ) -> AppResult<Json<Value>> {
-    let cur_ts;
-    let cur_id;
-    let limit;
-    if let Some(p) = params.page {
-        let (ts, id) = p.keyset();
-        cur_ts = ts;
-        cur_id = id;
-        limit = p.limit();
-    } else {
-        cur_ts = i64::MAX;
-        cur_id = "~".to_string();
-        limit = 20;
-    }
+    // Keyset cursor "created_at,id" or the sentinel "MAX,~" for the first page.
+    let (cur_ts, cur_id) = match params
+        .cursor
+        .as_deref()
+        .and_then(|c| c.split_once(','))
+    {
+        Some((ts, id)) => (ts.parse().unwrap_or(i64::MAX), id.to_string()),
+        None => (i64::MAX, "~".to_string()),
+    };
+    let limit = params.limit.unwrap_or(20).clamp(1, 50);
     let parent_id = params.parent_id; // None = root comments
     let items: Vec<Value> = state.db.read.with(move |conn| {
-        let mut stmt = if let Some(ref pid) = parent_id {
+        let mut stmt = if parent_id.is_some() {
             conn.prepare(
                 "SELECT c.id, c.body, c.created_at, u.id, u.username, u.display_name, u.avatar_cid
                  FROM comments c JOIN users u ON u.id = c.author_id
@@ -308,6 +305,7 @@ pub async fn comment_create(
     let id2 = id.clone();
     let body2 = body.clone();
     let parent = req.parent_id.clone();
+    let parent_for_response = parent.clone();
     let author = state
         .db
         .writer
@@ -345,6 +343,6 @@ pub async fn comment_create(
         .add_delta("posts", "comment_count", &post_id, 1);
     crate::api::notifications::notify(&state, &author, "comment", &me, Some(&post_id)).await;
     Ok(Json(json!({
-        "id": id, "post_id": post_id, "parent_id": parent, "body": body, "created_at": created,
+        "id": id, "post_id": post_id, "parent_id": parent_for_response, "body": body, "created_at": created,
     })))
 }

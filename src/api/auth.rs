@@ -72,6 +72,27 @@ async fn issue_pair(state: &AppState, user_id: &str) -> AppResult<Json<Value>> {
     })))
 }
 
+/// Like `issue_pair` but mints a *short-lived* token used as proof that the caller
+/// just passed the first factor (password). It can be exchanged at
+/// `POST /v1/auth/2fa` for a real pair once they pass the second factor.
+async fn issue_pending_2fa(state: &AppState, user_id: &str) -> AppResult<String> {
+    // Signed by the same JWT secret, but tagged with `2fa:pending:<uid>` so it
+    // can't be used as a regular access token and expires fast (10 min).
+    let pending_ttl = 600;
+    crate::auth::jwt::issue(
+        &state.cfg.jwt_secret,
+        &format!("2fa:pending:{}", user_id),
+        pending_ttl,
+    )
+}
+
+fn parse_pending_2fa(secret: &str, token: &str) -> AppResult<String> {
+    let claims = crate::auth::jwt::verify(secret, token)?;
+    let sub = claims.sub.strip_prefix("2fa:pending:")
+        .ok_or_else(|| AppError::unauthorized("not a 2fa pending token"))?;
+    Ok(sub.to_string())
+}
+
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterReq>,
@@ -128,6 +149,31 @@ pub async fn login(
     if !password::verify_blocking(hash, req.password).await? {
         return Err(AppError::unauthorized("invalid credentials"));
     }
+    // If 2FA is on, mint a pending token instead of the real pair.
+    let (enabled, _) = crate::api::totp::user_factor(&state, &user_id)?;
+    if enabled {
+        let pending = issue_pending_2fa(&state, &user_id).await?;
+        return Ok(Json(json!({
+            "requires_2fa": true,
+            "pending_token": pending,
+            "user_id": user_id,
+        })));
+    }
+    issue_pair(&state, &user_id).await
+}
+
+#[derive(Deserialize)]
+pub struct Verify2faReq {
+    pub pending_token: String,
+    pub code: String,
+}
+
+pub async fn verify_2fa(
+    State(state): State<AppState>,
+    Json(req): Json<Verify2faReq>,
+) -> AppResult<Json<Value>> {
+    let user_id = parse_pending_2fa(&state.cfg.jwt_secret, &req.pending_token)?;
+    crate::api::totp::verify_factor(&state, &user_id, &req.code).await?;
     issue_pair(&state, &user_id).await
 }
 

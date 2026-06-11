@@ -12,6 +12,7 @@ pub mod posts;
 pub mod ratelimit;
 pub mod social;
 pub mod stories;
+pub mod totp;
 pub mod users;
 
 use crate::error::AppResult;
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/google", post(auth::google))
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/auth/logout", post(auth::logout))
+        .route("/v1/auth/2fa", post(auth::verify_2fa))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit_auth,
@@ -52,6 +54,11 @@ pub fn router(state: AppState) -> Router {
         // users
         .route("/v1/users/me", get(users::get_me).patch(users::patch_me))
         .route("/v1/users/me/privacy", axum::routing::patch(social::patch_privacy))
+        // 2FA
+        .route("/v1/users/me/2fa", get(totp::status))
+        .route("/v1/users/me/2fa/enable", post(totp::enable))
+        .route("/v1/users/me/2fa/confirm", post(totp::confirm))
+        .route("/v1/users/me/2fa/disable", post(totp::disable))
         .route("/v1/users/me/notification-prefs", post(social::post_notif_prefs))
         .route("/v1/users/me/highlights", get(social::my_highlights))
         .route("/v1/users/{username}", get(users::get_user))
