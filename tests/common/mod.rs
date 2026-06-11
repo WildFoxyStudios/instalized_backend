@@ -98,6 +98,15 @@ impl TestApp {
         self.request(reqwest::Method::PUT, path, token, None).await
     }
 
+    pub async fn put_with_body(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Value,
+    ) -> (u16, Value) {
+        self.request(reqwest::Method::PUT, path, token, Some(body)).await
+    }
+
     pub async fn delete(&self, path: &str, token: Option<&str>) -> (u16, Value) {
         self.request(reqwest::Method::DELETE, path, token, None).await
     }

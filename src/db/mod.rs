@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/004_totp.sql"),
     include_str!("../../migrations/005_push.sql"),
     include_str!("../../migrations/006_dm_media.sql"),
+    include_str!("../../migrations/007_dm_reactions.sql"),
 ];
 
 /// Unix epoch seconds.

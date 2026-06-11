@@ -135,6 +135,11 @@ pub fn router(state: AppState) -> Router {
             get(dm::messages_list).post(dm::message_create),
         )
         .route("/v1/dm/threads/{id}/read", post(dm::mark_read))
+        // dm message reactions
+        .route(
+            "/v1/dm/messages/{id}/reaction",
+            put(dm::react_to_message).delete(dm::clear_my_reaction),
+        )
         // live
         .route("/v1/live", post(live::create_stream))
         .route("/v1/live/{id}", get(live::get_stream))

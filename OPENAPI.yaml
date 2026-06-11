@@ -679,6 +679,75 @@ paths:
       responses:
         "200": { description: count marked, content: { application/json: { schema: { type: object, properties: { read: { type: integer } } } } } }
 
+  /v1/dm/messages/{id}/reaction:
+    put:
+      tags: [dm]
+      summary: React to a DM (PUT is a toggle: same emoji removes, different emoji swaps; peer gets dm.reaction over WS)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emoji]
+              properties:
+                emoji:
+                  type: string
+                  minLength: 1
+                  maxLength: 16
+                  description: "Single emoji; NFC-normalized, trimmed, ≤16 chars after normalization"
+                  example: "👍"
+      responses:
+        "200":
+          description: aggregate after the toggle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message_id: { type: string }
+                  reactions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        emoji: { type: string }
+                        count: { type: integer }
+                        users:
+                          type: array
+                          items: { type: string }
+                        mine: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [dm]
+      summary: Clear my reaction on a DM (idempotent; peer gets dm.reaction with empty aggregate)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: aggregate after the clear
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message_id: { type: string }
+                  reactions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        emoji: { type: string }
+                        count: { type: integer }
+                        users:
+                          type: array
+                          items: { type: string }
+                        mine: { type: boolean }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/live:
     post:
       tags: [live]

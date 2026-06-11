@@ -362,3 +362,242 @@ pub async fn mark_read_core(
     }
     Ok(n)
 }
+
+// ---------------- reactions ----------------
+//
+// A user can react to any message in a thread they belong to. The reaction
+// is a single emoji (we trim + NFC-normalize + cap at 16 chars server-side).
+// A user can have at most one reaction per message — re-reacting with the
+// same emoji is a toggle (delete), re-reacting with a different emoji is
+// a swap (delete old, insert new). Both happen in a single writer call so
+// the unique-index invariant cannot be observed mid-flight by other writers.
+//
+// Realtime: the peer is notified via WS with `dm.reaction` carrying the
+// message_id, emoji, user_id, and the resulting aggregate (count for that
+// emoji + whether `mine` for the peer). This lets the receiver flip a
+// single bubble in place without re-fetching the page.
+
+/// Maximum bytes of a normalized emoji we will accept. 16 is enough for any
+/// real emoji (single codepoint, flag, ZWJ family, skin tone) but rejects
+/// pasted rivers of ZWJ + variation selectors.
+const MAX_EMOJI_LEN: usize = 16;
+
+fn normalize_emoji(raw: &str) -> AppResult<String> {
+    // Trim surrounding whitespace.
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("emoji required"));
+    }
+    // NFC normalize so the same visual glyph (decomposed vs. precomposed)
+    // shares a single key in the unique index.
+    let nfc: String = unicode_normalization::UnicodeNormalization::nfc(trimmed)
+        .collect();
+    // Enforce length AFTER normalization so a user can't smuggle a long
+    // sequence by sneaking combining marks into a short-emoji input.
+    if nfc.chars().count() > MAX_EMOJI_LEN {
+        return Err(AppError::bad_request(format!(
+            "emoji too long (max {MAX_EMOJI_LEN} chars)"
+        )));
+    }
+    Ok(nfc)
+}
+
+#[derive(Deserialize)]
+pub struct ReactionReq {
+    pub emoji: String,
+}
+
+/// `PUT /v1/dm/messages/{id}/reaction` — toggle on.
+///
+/// If the user already has a reaction on this message, the request is a
+/// SWAP (the old reaction is removed, the new one inserted). If the new
+/// emoji equals the old emoji, the request is a TOGGLE-OFF and the user
+/// ends up with no reaction. Either way, the response is the up-to-date
+/// aggregate (per-emoji counts and which user is "me") and the WS event
+/// fans out to the peer with the same payload.
+pub async fn react_to_message(
+    State(state): State<AppState>,
+    AuthUser(me): AuthUser,
+    Path(message_id): Path<String>,
+    Json(req): Json<ReactionReq>,
+) -> AppResult<Json<Value>> {
+    let emoji = normalize_emoji(&req.emoji)?;
+    let (peer, payload) = react_core(&state, &me, &message_id, &emoji).await?;
+    let _ = state
+        .hub
+        .send_to_user(&peer, &protocol::msg("dm.reaction", payload.clone()))
+        .await;
+    Ok(Json(payload))
+}
+
+/// `DELETE /v1/dm/messages/{id}/reaction` — clear my reaction unconditionally.
+pub async fn clear_my_reaction(
+    State(state): State<AppState>,
+    AuthUser(me): AuthUser,
+    Path(message_id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let peer = {
+        let me2 = me.clone();
+        let mid = message_id.clone();
+        state
+            .db
+            .writer
+            .call(move |conn| {
+                // message_peer validates the message belongs to a thread I am in
+                // and returns the OTHER member's id (the one we should notify).
+                let peer = message_peer(conn, &mid, &me2)?;
+                let _n = conn.execute(
+                    "DELETE FROM dm_reactions WHERE message_id = ?1 AND user_id = ?2",
+                    rusqlite::params![mid, me2],
+                )?;
+                Ok(peer)
+            })
+            .await?
+    };
+    let payload = reaction_payload_for(&state, &message_id, &me).await?;
+    let _ = state
+        .hub
+        .send_to_user(&peer, &protocol::msg("dm.reaction", payload.clone()))
+        .await;
+    Ok(Json(payload))
+}
+
+/// Shared core for the toggle. Returns (peer_id, payload) so the caller
+/// can fan out the realtime event with the new aggregate.
+async fn react_core(
+    state: &AppState,
+    me: &str,
+    message_id: &str,
+    emoji: &str,
+) -> AppResult<(String, Value)> {
+    let me2 = me.to_string();
+    let mid = message_id.to_string();
+    let emoji2 = emoji.to_string();
+    let (peer, prev_emoji) = state
+        .db
+        .writer
+        .call(move |conn| {
+            let peer = message_peer(conn, &mid, &me2)?;
+            // Find the user's current reaction, if any.
+            let prev: Option<String> = conn
+                .query_row(
+                    "SELECT emoji FROM dm_reactions WHERE message_id = ?1 AND user_id = ?2",
+                    rusqlite::params![mid, me2],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(ref old) = prev {
+                if old == &emoji2 {
+                    // Same emoji → toggle off.
+                    conn.execute(
+                        "DELETE FROM dm_reactions WHERE message_id = ?1 AND user_id = ?2",
+                        rusqlite::params![mid, me2],
+                    )?;
+                } else {
+                    // Different emoji → swap.
+                    conn.execute(
+                        "UPDATE dm_reactions SET emoji = ?1, created_at = ?2
+                          WHERE message_id = ?3 AND user_id = ?4",
+                        rusqlite::params![emoji2, now(), mid, me2],
+                    )?;
+                }
+            } else {
+                // No prior reaction → insert.
+                conn.execute(
+                    "INSERT INTO dm_reactions (id, message_id, user_id, emoji, created_at)
+                          VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![new_id(), mid, me2, emoji2, now()],
+                )?;
+            }
+            Ok((peer, prev))
+        })
+        .await?;
+    let payload = reaction_payload_for(state, message_id, me).await?;
+    // If the user toggled off and the peer already had no notifications to
+    // process, we still send so any open client can clear the chip.
+    let _ = prev_emoji; // kept for future auditing
+    Ok((peer, payload))
+}
+
+/// Look up the peer's user_id for a given message, asserting the caller
+/// is a thread member. Returns the OTHER member's id (the one we should
+/// notify over WS).
+fn message_peer(conn: &rusqlite::Connection, message_id: &str, me: &str) -> AppResult<String> {
+    let (a, b): (String, String) = conn
+        .query_row(
+            "SELECT t.user_a, t.user_b
+               FROM dm_messages m
+               JOIN dm_threads  t ON t.id = m.thread_id
+              WHERE m.id = ?1",
+            [message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| AppError::not_found("message not found"))?;
+    if a == me {
+        Ok(b)
+    } else if b == me {
+        Ok(a)
+    } else {
+        Err(AppError::forbidden("not a member of this thread"))
+    }
+}
+
+/// Build the per-emoji aggregate for a message and attach `mine: true` to
+/// the emoji the `me` user currently has on it (if any). Used both by the
+/// REST response and by the realtime fan-out payload.
+///
+/// Shape:
+/// ```json
+/// {
+///   "message_id": "01H...",
+///   "reactions": [
+///     { "emoji": "👍", "count": 2, "users": ["u_alice", "u_bob"], "mine": true  },
+///     { "emoji": "🔥", "count": 1, "users": ["u_carol"],         "mine": false }
+///   ]
+/// }
+/// ```
+async fn reaction_payload_for(
+    state: &AppState,
+    message_id: &str,
+    me: &str,
+) -> AppResult<Value> {
+    let me2 = me.to_string();
+    let mid = message_id.to_string();
+    let items: Vec<Value> = state.db.read.with(move |conn| {
+        // Authorize once: any reader that owns/has access to the message can see the aggregate.
+        let _peer = message_peer(conn, &mid, &me2)?;
+        let mut stmt = conn.prepare(
+            "SELECT emoji, user_id, COUNT(*) OVER (PARTITION BY emoji) AS n
+               FROM dm_reactions
+              WHERE message_id = ?1
+              ORDER BY emoji, created_at",
+        )?;
+        // Group by emoji in Rust: the WINDOW function gives us the per-emoji
+        // count on every row, but we want a single entry per emoji with the
+        // list of users. Easier to do this in two passes.
+        let mut by_emoji: std::collections::BTreeMap<String, (i64, Vec<String>)> =
+            std::collections::BTreeMap::new();
+        let mut rows = stmt.query(rusqlite::params![mid])?;
+        while let Some(r) = rows.next()? {
+            let emoji: String = r.get(0)?;
+            let user_id: String = r.get(1)?;
+            let n: i64 = r.get(2)?;
+            by_emoji.entry(emoji).or_insert((n, Vec::new())).1.push(user_id);
+        }
+        let items: Vec<Value> = by_emoji
+            .into_iter()
+            .map(|(emoji, (count, mut users))| {
+                users.sort();
+                let mine = users.iter().any(|u| u == &me2);
+                json!({
+                    "emoji": emoji,
+                    "count": count,
+                    "users": users,
+                    "mine": mine,
+                })
+            })
+            .collect();
+        Ok(items)
+    })?;
+    Ok(json!({ "message_id": message_id, "reactions": items }))
+}
