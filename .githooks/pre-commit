@@ -1,0 +1,29 @@
+# Instalized backend — pre-commit quality gate
+#
+# Detects staged Rust files in this repo and runs fmt + clippy + test.
+# Install with: git config core.hooksPath .githooks
+# Skip with:   git commit --no-verify
+
+$ErrorActionPreference = "SilentlyContinue"
+$staged = git diff --cached --name-only --diff-filter=ACMR 2>$null
+if (-not $staged) { exit 0 }
+
+$rust_files = $staged | Where-Object { $_ -match '\.rs$' }
+if (-not $rust_files) { exit 0 }
+
+$failed = $false
+
+Write-Host "[hook] backend: cargo fmt + clippy + test" -ForegroundColor Cyan
+cargo fmt --all -- --check
+if ($LASTEXITCODE -ne 0) { Write-Host "[hook] cargo fmt failed" -ForegroundColor Red; $failed = $true }
+cargo clippy --all-targets -- -D warnings
+if ($LASTEXITCODE -ne 0) { Write-Host "[hook] cargo clippy failed" -ForegroundColor Red; $failed = $true }
+cargo test --quiet
+if ($LASTEXITCODE -ne 0) { Write-Host "[hook] cargo test failed" -ForegroundColor Red; $failed = $true }
+
+if ($failed) {
+    Write-Host "[hook] pre-commit checks failed — commit blocked" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[hook] all checks passed" -ForegroundColor Green
+exit 0
