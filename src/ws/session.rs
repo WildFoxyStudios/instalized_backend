@@ -91,10 +91,28 @@ async fn dispatch(state: &AppState, user_id: &str, env: Envelope) {
         "dm.new" => {
             let to_user = str_field(&env.data, "to_user_id");
             let thread_id = str_field(&env.data, "thread_id");
-            let body = str_field(&env.data, "body").unwrap_or_default();
+            let body = str_field(&env.data, "body");
             let media_cid = str_field(&env.data, "media_cid");
-            match api::dm::send_message_core(state, user_id, to_user, thread_id, body, media_cid)
-                .await
+            let kind = str_field(&env.data, "kind");
+            let duration_ms = env
+                .data
+                .get("duration_ms")
+                .and_then(|v| v.as_i64());
+            let waveform = str_field(&env.data, "waveform");
+            let thumb_cid = str_field(&env.data, "thumb_cid");
+            let width = env.data.get("width").and_then(|v| v.as_i64());
+            let height = env.data.get("height").and_then(|v| v.as_i64());
+            let req = api::dm::MessageReq {
+                body,
+                media_cid,
+                kind,
+                duration_ms,
+                waveform,
+                thumb_cid,
+                width,
+                height,
+            };
+            match api::dm::send_message_core(state, user_id, to_user, thread_id, req).await
             {
                 Ok(message) => {
                     state

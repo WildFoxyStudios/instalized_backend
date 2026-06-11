@@ -140,7 +140,8 @@ pub async fn messages_list(
     let items: Vec<Value> = state.db.read.with(move |conn| {
         thread_peer(conn, &thread_id, &me)?;
         let mut stmt = conn.prepare(
-            "SELECT id, sender_id, body, media_cid, created_at, read_at
+            "SELECT id, sender_id, body, media_cid, created_at, read_at,
+                    kind, duration_ms, waveform, thumb_cid, width, height
              FROM dm_messages
              WHERE thread_id = ?1
                AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
@@ -155,6 +156,12 @@ pub async fn messages_list(
                     "media_cid": r.get::<_, Option<String>>(3)?,
                     "created_at": r.get::<_, i64>(4)?,
                     "read_at": r.get::<_, Option<i64>>(5)?,
+                    "kind": r.get::<_, String>(6)?,
+                    "duration_ms": r.get::<_, Option<i64>>(7)?,
+                    "waveform": r.get::<_, Option<String>>(8)?,
+                    "thumb_cid": r.get::<_, Option<String>>(9)?,
+                    "width": r.get::<_, Option<i64>>(10)?,
+                    "height": r.get::<_, Option<i64>>(11)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -164,10 +171,24 @@ pub async fn messages_list(
     Ok(Json(json!({ "items": items, "next_cursor": next_cursor })))
 }
 
+/// Validated message-create payload.
+///
+/// Kind is required to be one of `text|image|voice` (future: `video|reel`).
+/// `duration_ms` is required for `voice`. `waveform` is a JSON-encoded
+/// array of small integers (≤200 samples) that the sender computed
+/// client-side; the backend stores it verbatim and the receiver renders
+/// the playback scrubber from it without having to decode audio first.
 #[derive(Deserialize)]
 pub struct MessageReq {
     pub body: Option<String>,
     pub media_cid: Option<String>,
+    /// Defaults to "text" when the payload is body-only.
+    pub kind: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub waveform: Option<String>,
+    pub thumb_cid: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
 }
 
 pub async fn message_create(
@@ -181,8 +202,7 @@ pub async fn message_create(
         &me,
         None,
         Some(thread_id),
-        req.body.unwrap_or_default(),
-        req.media_cid,
+        req,
     )
     .await?;
     Ok(Json(message))
@@ -194,10 +214,10 @@ pub async fn send_message_core(
     sender: &str,
     to_user: Option<String>,
     thread_id: Option<String>,
-    body: String,
-    media_cid: Option<String>,
+    req: MessageReq,
 ) -> AppResult<Value> {
-    let body = body.trim().to_string();
+    let body = req.body.unwrap_or_default().trim().to_string();
+    let media_cid = req.media_cid;
     if body.is_empty() && media_cid.is_none() {
         return Err(AppError::bad_request("message needs body or media_cid"));
     }
@@ -206,6 +226,25 @@ pub async fn send_message_core(
     }
     if let Some(ref c) = media_cid {
         crate::api::validate_cid(c)?;
+    }
+    if let Some(ref c) = req.thumb_cid {
+        crate::api::validate_cid(c)?;
+    }
+    let kind = req.kind.unwrap_or_else(|| "text".to_string());
+    if !matches!(kind.as_str(), "text" | "image" | "voice" | "video" | "reel") {
+        return Err(AppError::bad_request(format!("unknown kind: {kind}")));
+    }
+    if kind == "voice" {
+        match req.duration_ms {
+            Some(0..=600_000) => {} // ≤ 10 min
+            _ => return Err(AppError::bad_request("voice needs duration_ms 1..=600000")),
+        }
+        if req.waveform.as_deref().map_or(true, |s| s.is_empty()) {
+            return Err(AppError::bad_request("voice needs waveform"));
+        }
+    }
+    if matches!(kind.as_str(), "image" | "video" | "reel") && media_cid.is_none() {
+        return Err(AppError::bad_request("media message needs media_cid"));
     }
 
     // Resolve the thread + peer.
@@ -230,14 +269,25 @@ pub async fn send_message_core(
     let sender2 = sender.to_string();
     let body2 = body.clone();
     let media2 = media_cid.clone();
+    let kind2 = kind.clone();
+    let duration2 = req.duration_ms;
+    let waveform2 = req.waveform.clone();
+    let thumb2 = req.thumb_cid.clone();
+    let width2 = req.width;
+    let height2 = req.height;
     state
         .db
         .writer
         .call(move |conn| {
             conn.execute(
-                "INSERT INTO dm_messages (id, thread_id, sender_id, body, media_cid, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![id2, tid2, sender2, body2, media2, created],
+                "INSERT INTO dm_messages
+                   (id, thread_id, sender_id, body, media_cid, created_at,
+                    kind, duration_ms, waveform, thumb_cid, width, height)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    id2, tid2, sender2, body2, media2, created,
+                    kind2, duration2, waveform2, thumb2, width2, height2
+                ],
             )?;
             Ok(())
         })
@@ -246,6 +296,8 @@ pub async fn send_message_core(
     let message = json!({
         "id": id, "thread_id": thread_id, "sender_id": sender,
         "body": body, "media_cid": media_cid, "created_at": created, "read_at": null,
+        "kind": kind, "duration_ms": req.duration_ms, "waveform": req.waveform,
+        "thumb_cid": req.thumb_cid, "width": req.width, "height": req.height,
     });
 
     // Realtime to the recipient; offline → push notification path (manifesto #5).
