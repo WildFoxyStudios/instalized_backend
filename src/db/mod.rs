@@ -11,6 +11,7 @@ use std::sync::Arc;
 const MIGRATIONS: &[&str] = &[
     include_str!("../../migrations/001_init.sql"),
     include_str!("../../migrations/002_social.sql"),
+    include_str!("../../migrations/003_social_v2.sql"),
 ];
 
 /// Unix epoch seconds.

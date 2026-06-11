@@ -188,6 +188,7 @@ pub async fn user_posts(
             "SELECT {POST_COLS} FROM posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = ?1
+             LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = ?1
              WHERE p.author_id = ?2 AND p.deleted_at IS NULL
                AND (p.created_at < ?3 OR (p.created_at = ?3 AND p.id < ?4))
              ORDER BY p.created_at DESC, p.id DESC LIMIT ?5"

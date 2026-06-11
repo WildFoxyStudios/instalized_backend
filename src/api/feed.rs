@@ -20,6 +20,7 @@ pub async fn home_feed(
             "SELECT {POST_COLS} FROM posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = ?1
+             LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = ?1
              WHERE p.deleted_at IS NULL
                AND (p.author_id = ?1 OR p.author_id IN
                     (SELECT followee_id FROM follows WHERE follower_id = ?1))
@@ -48,6 +49,7 @@ pub async fn reels(
             "SELECT {POST_COLS} FROM posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = ?1
+             LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = ?1
              WHERE p.deleted_at IS NULL AND p.kind = 'reel'
                AND u.is_private = 0
                AND (p.created_at < ?2 OR (p.created_at = ?2 AND p.id < ?3))

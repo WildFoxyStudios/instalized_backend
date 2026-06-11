@@ -73,6 +73,7 @@ pub async fn explore(
             "SELECT {POST_COLS} FROM posts p
              JOIN users u ON u.id = p.author_id
              LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = ?1
+             LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = ?1
              WHERE p.deleted_at IS NULL AND u.is_private = 0
                AND (p.created_at < ?2 OR (p.created_at = ?2 AND p.id < ?3))
              ORDER BY p.created_at DESC, p.id DESC LIMIT ?4"
@@ -150,6 +151,7 @@ pub async fn saved_list(
              JOIN posts p ON p.id = s.post_id AND p.deleted_at IS NULL
              JOIN users u ON u.id = p.author_id
              LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = ?1
+             LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = ?1
              WHERE s.user_id = ?1
                AND (s.created_at < ?2 OR (s.created_at = ?2 AND s.post_id < ?3))
              ORDER BY s.created_at DESC, s.post_id DESC LIMIT ?4"
@@ -158,7 +160,7 @@ pub async fn saved_list(
         let rows = stmt
             .query_map(rusqlite::params![me2, cur_ts, cur_id, limit], |r| {
                 let mut v = post_from_row(r)?;
-                v["saved_at"] = json!(r.get::<_, i64>(16)?);
+                v["saved_at"] = json!(r.get::<_, i64>(17)?);
                 Ok(v)
             })?
             .collect::<Result<Vec<_>, _>>()?;

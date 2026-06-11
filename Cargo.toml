@@ -24,6 +24,7 @@ thiserror = "2"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"

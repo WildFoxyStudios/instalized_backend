@@ -10,6 +10,7 @@ pub mod media;
 pub mod notifications;
 pub mod posts;
 pub mod ratelimit;
+pub mod social;
 pub mod stories;
 pub mod users;
 
@@ -50,20 +51,38 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ws", get(crate::ws::session::ws_handler))
         // users
         .route("/v1/users/me", get(users::get_me).patch(users::patch_me))
+        .route("/v1/users/me/privacy", axum::routing::patch(social::patch_privacy))
+        .route("/v1/users/me/notification-prefs", post(social::post_notif_prefs))
+        .route("/v1/users/me/highlights", get(social::my_highlights))
         .route("/v1/users/{username}", get(users::get_user))
         .route("/v1/users/{username}/posts", get(users::user_posts))
+        .route("/v1/users/{username}/highlights", get(social::user_highlights))
         .route("/v1/users/{username}/followers", get(discover::followers))
         .route("/v1/users/{username}/following", get(discover::following))
         .route(
             "/v1/users/{id}/follow",
             put(users::follow).delete(users::unfollow),
         )
+        .route(
+            "/v1/users/{id}/block",
+            post(social::block).delete(social::unblock),
+        )
+        .route(
+            "/v1/users/{id}/mute",
+            post(social::mute).delete(social::unmute),
+        )
+        .route("/v1/users/{id}/report", post(social::report_user))
+        // me
+        .route("/v1/me/blocked", get(social::blocked_list))
+        .route("/v1/me/saved", get(discover::saved_list))
+        .route("/v1/me/archive", get(social::my_archive))
+        .route("/v1/me/deleted", get(social::my_deleted))
         // feed + discovery
         .route("/v1/feed", get(feed::home_feed))
         .route("/v1/reels", get(feed::reels))
         .route("/v1/explore", get(discover::explore))
+        .route("/v1/explore/tags/{tag}", get(social::hashtag_grid))
         .route("/v1/search/users", get(discover::search_users))
-        .route("/v1/me/saved", get(discover::saved_list))
         // posts
         .route("/v1/posts", post(posts::create_post))
         .route(
@@ -83,10 +102,22 @@ pub fn router(state: AppState) -> Router {
             put(discover::save_post).delete(discover::unsave_post),
         )
         .route("/v1/posts/{id}/report", post(discover::report_post))
+        .route(
+            "/v1/posts/{id}/archive",
+            post(social::archive_post).delete(social::unarchive_post),
+        )
+        .route("/v1/posts/{id}/restore", post(social::restore_post))
         .route("/v1/comments/{id}", axum::routing::delete(discover::delete_comment))
+        .route(
+            "/v1/comments/{id}/like",
+            put(social::like_comment).delete(social::unlike_comment),
+        )
         // stories
         .route("/v1/stories", post(stories::create_story))
         .route("/v1/stories/feed", get(stories::stories_feed))
+        // highlights
+        .route("/v1/highlights", post(social::create_highlight))
+        .route("/v1/highlights/{id}", get(social::highlight_detail))
         // dm
         .route(
             "/v1/dm/threads",
@@ -157,11 +188,13 @@ pub fn cursor_of(created_at: i64, id: &str) -> String {
 
 // ---------- shared row mappers ----------
 
-/// Column list matching `post_from_row`. Requires aliases `p` (posts), `u` (author)
-/// and a `LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = :viewer`.
+/// Column list matching `post_from_row`. Requires aliases `p` (posts), `u` (author),
+/// a `LEFT JOIN likes l ON l.post_id = p.id AND l.user_id = :viewer` and a
+/// `LEFT JOIN saved_posts sv ON sv.post_id = p.id AND sv.user_id = :viewer`.
 pub const POST_COLS: &str = "p.id, p.author_id, u.username, u.display_name, u.avatar_cid, \
      p.kind, p.media_cid, p.thumb_cid, p.width, p.height, p.duration_ms, p.caption, \
-     p.like_count, p.comment_count, p.created_at, (l.user_id IS NOT NULL)";
+     p.like_count, p.comment_count, p.created_at, (l.user_id IS NOT NULL), \
+     (sv.user_id IS NOT NULL)";
 
 pub fn post_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
@@ -183,6 +216,7 @@ pub fn post_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "comment_count": r.get::<_, i64>(13)?,
         "created_at": r.get::<_, i64>(14)?,
         "liked_by_me": r.get::<_, bool>(15)?,
+        "saved_by_me": r.get::<_, bool>(16)?,
     }))
 }
 
