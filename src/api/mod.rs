@@ -2,6 +2,7 @@
 //! and the shared keyset-pagination / row-mapping helpers.
 
 pub mod auth;
+pub mod discover;
 pub mod dm;
 pub mod feed;
 pub mod live;
@@ -51,13 +52,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/users/me", get(users::get_me).patch(users::patch_me))
         .route("/v1/users/{username}", get(users::get_user))
         .route("/v1/users/{username}/posts", get(users::user_posts))
+        .route("/v1/users/{username}/followers", get(discover::followers))
+        .route("/v1/users/{username}/following", get(discover::following))
         .route(
             "/v1/users/{id}/follow",
             put(users::follow).delete(users::unfollow),
         )
-        // feed
+        // feed + discovery
         .route("/v1/feed", get(feed::home_feed))
         .route("/v1/reels", get(feed::reels))
+        .route("/v1/explore", get(discover::explore))
+        .route("/v1/search/users", get(discover::search_users))
+        .route("/v1/me/saved", get(discover::saved_list))
         // posts
         .route("/v1/posts", post(posts::create_post))
         .route(
@@ -72,6 +78,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/posts/{id}/comments",
             get(posts::comments_list).post(posts::comment_create),
         )
+        .route(
+            "/v1/posts/{id}/save",
+            put(discover::save_post).delete(discover::unsave_post),
+        )
+        .route("/v1/posts/{id}/report", post(discover::report_post))
+        .route("/v1/comments/{id}", axum::routing::delete(discover::delete_comment))
         // stories
         .route("/v1/stories", post(stories::create_story))
         .route("/v1/stories/feed", get(stories::stories_feed))

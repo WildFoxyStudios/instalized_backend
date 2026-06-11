@@ -418,3 +418,79 @@ async fn auth_rate_limit_returns_429() {
     let (status, _) = app.get("/healthz", None).await;
     assert_eq!(status, 200);
 }
+
+#[tokio::test]
+async fn discovery_search_explore_saved_and_moderation() {
+    let app = common::spawn(|_| {}).await;
+    let (alice, _, _alice_id) = app.register("alice_garcia").await;
+    let (bob, _, bob_id) = app.register("bob_martinez").await;
+    let (eve, _, _) = app.register("eve_observer").await;
+    let post_id = app.create_post(&bob, "image", "bafydiscovery").await;
+
+    // --- search: substring on username, ordered, escaped ---
+    let (status, v) = app.get("/v1/search/users?q=mart", Some(&alice)).await;
+    assert_eq!(status, 200);
+    assert_eq!(v["items"][0]["username"], "bob_martinez");
+    let (_, v) = app.get("/v1/search/users?q=a", Some(&alice)).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0, "min 2 chars");
+    let (_, v) = app.get("/v1/search/users?q=%25", Some(&alice)).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0, "wildcards escaped");
+
+    // --- explore: public posts visible, private authors excluded ---
+    let (_, v) = app.get("/v1/explore", Some(&alice)).await;
+    assert_eq!(v["items"][0]["id"], post_id.as_str());
+    app.request(reqwest::Method::PATCH, "/v1/users/me", Some(&bob),
+        Some(json!({"is_private": true}))).await;
+    let (_, v) = app.get("/v1/explore", Some(&alice)).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0, "private author left explore");
+    app.request(reqwest::Method::PATCH, "/v1/users/me", Some(&bob),
+        Some(json!({"is_private": false}))).await;
+
+    // --- saved posts ---
+    let (status, v) = app.put(&format!("/v1/posts/{post_id}/save"), Some(&alice)).await;
+    assert_eq!(status, 200);
+    assert_eq!(v["saved"], true);
+    app.put(&format!("/v1/posts/{post_id}/save"), Some(&alice)).await; // idempotent
+    let (_, v) = app.get("/v1/me/saved", Some(&alice)).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["items"][0]["id"], post_id.as_str());
+    app.delete(&format!("/v1/posts/{post_id}/save"), Some(&alice)).await;
+    let (_, v) = app.get("/v1/me/saved", Some(&alice)).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0);
+
+    // --- follower / following lists ---
+    app.put(&format!("/v1/users/{bob_id}/follow"), Some(&alice)).await;
+    let (_, v) = app.get("/v1/users/bob_martinez/followers", Some(&eve)).await;
+    assert_eq!(v["items"][0]["username"], "alice_garcia");
+    assert_eq!(v["items"][0]["is_following"], false, "eve does not follow alice");
+    let (_, v) = app.get("/v1/users/alice_garcia/following", Some(&alice)).await;
+    assert_eq!(v["items"][0]["username"], "bob_martinez");
+
+    // --- comment deletion: author, post owner, nobody else ---
+    let (_, c1) = app.post(&format!("/v1/posts/{post_id}/comments"), Some(&alice),
+        json!({"body": "first"})).await;
+    let (_, c2) = app.post(&format!("/v1/posts/{post_id}/comments"), Some(&alice),
+        json!({"body": "second"})).await;
+    let c1_id = c1["id"].as_str().unwrap();
+    let c2_id = c2["id"].as_str().unwrap();
+    let (status, _) = app.delete(&format!("/v1/comments/{c1_id}"), Some(&eve)).await;
+    assert_eq!(status, 403, "stranger cannot delete");
+    let (status, _) = app.delete(&format!("/v1/comments/{c1_id}"), Some(&alice)).await;
+    assert_eq!(status, 200, "comment author deletes");
+    let (status, _) = app.delete(&format!("/v1/comments/{c2_id}"), Some(&bob)).await;
+    assert_eq!(status, 200, "post owner moderates");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (_, post) = app.get(&format!("/v1/posts/{post_id}"), Some(&alice)).await;
+    assert_eq!(post["comment_count"], 0, "batched counter drained");
+
+    // --- reports: idempotent per user ---
+    let (status, v) = app.post(&format!("/v1/posts/{post_id}/report"), Some(&alice),
+        json!({"reason": "spam"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(v["reported"], true);
+    app.post(&format!("/v1/posts/{post_id}/report"), Some(&alice), json!({"reason": "spam"})).await;
+    let n: i64 = app.state.db.read
+        .with(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM reports", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 1, "one report row per (user, post)");
+}

@@ -134,7 +134,7 @@ pub async fn patch_me(
     Ok(Json(profile_json(&state, &me, &me)?))
 }
 
-fn user_id_by_username(state: &AppState, username: &str) -> AppResult<String> {
+pub(crate) fn user_id_by_username(state: &AppState, username: &str) -> AppResult<String> {
     let username = username.to_lowercase();
     state.db.read.with(move |conn| {
         conn.query_row("SELECT id FROM users WHERE username = ?1", [&username], |r| {

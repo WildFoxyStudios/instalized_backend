@@ -652,6 +652,116 @@ paths:
       responses:
         "200": { description: stored, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
 
+  /v1/search/users:
+    get:
+      tags: [feed]
+      summary: User search (username/display_name substring, min 2 chars)
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2, maxLength: 64 } }
+      responses:
+        "200":
+          description: matches ordered by followers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: "#/components/schemas/Author" }
+                        - type: object
+                          properties:
+                            followers: { type: integer }
+
+  /v1/explore:
+    get:
+      tags: [feed]
+      summary: Explore grid — recent posts from public accounts (keyset)
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/PostPage" }
+
+  /v1/me/saved:
+    get:
+      tags: [posts]
+      summary: Bookmarked posts, most recently saved first
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/PostPage" }
+
+  /v1/posts/{id}/save:
+    put:
+      tags: [posts]
+      summary: Bookmark a post (idempotent)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: saved, content: { application/json: { schema: { type: object, properties: { saved: { type: boolean } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [posts]
+      summary: Remove a bookmark
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: unsaved, content: { application/json: { schema: { type: object, properties: { saved: { type: boolean } } } } } }
+
+  /v1/posts/{id}/report:
+    post:
+      tags: [posts]
+      summary: Report a post (one per user per post — moderation inbox)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        "200": { description: reported, content: { application/json: { schema: { type: object, properties: { reported: { type: boolean } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/comments/{id}:
+    delete:
+      tags: [posts]
+      summary: Delete a comment (comment author or post owner)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: boolean } } } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/users/{username}/followers:
+    get:
+      tags: [users]
+      summary: Follower list (keyset on follow time)
+      security: []
+      parameters:
+        - { name: username, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/FollowPage" }
+
+  /v1/users/{username}/following:
+    get:
+      tags: [users]
+      summary: Following list (keyset on follow time)
+      security: []
+      parameters:
+        - { name: username, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/FollowPage" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -693,6 +803,23 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Post" }
+    FollowPage:
+      description: Page of follow-graph entries
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              items:
+                type: array
+                items:
+                  allOf:
+                    - { $ref: "#/components/schemas/Author" }
+                    - type: object
+                      properties:
+                        followed_at: { type: integer, format: int64 }
+                        is_following: { type: boolean, description: viewer→entry edge }
+              next_cursor: { type: string, nullable: true }
     PostPage:
       description: Page of posts
       content:

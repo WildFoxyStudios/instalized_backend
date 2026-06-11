@@ -8,7 +8,10 @@ use crate::error::{AppError, AppResult};
 use rusqlite::Connection;
 use std::sync::Arc;
 
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/001_init.sql"),
+    include_str!("../../migrations/002_social.sql"),
+];
 
 /// Unix epoch seconds.
 pub fn now() -> i64 {
