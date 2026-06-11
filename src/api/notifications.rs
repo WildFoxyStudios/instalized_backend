@@ -112,17 +112,44 @@ pub struct PushRegisterReq {
 pub async fn register_push(
     State(state): State<AppState>,
     AuthUser(me): AuthUser,
-    Json(req): Json<PushRegisterReq>,
+    Json(req): Json<RegisterPushReq>,
+) -> AppResult<Json<Value>> {
+    let token = req.token;
+    if token.len() > 4096 {
+        return Err(AppError::bad_request("token too long"));
+    }
+    let me2 = me.clone();
+    state
+        .db
+        .writer
+        .call(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO push_tokens (user_id, platform, token, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![me2, req.platform, token, now()],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct UnregisterPushReq {
+    pub token: String,
+}
+
+pub async fn unregister_push(
+    State(state): State<AppState>,
+    AuthUser(me): AuthUser,
+    Json(req): Json<UnregisterPushReq>,
 ) -> AppResult<Json<Value>> {
     state
         .db
         .writer
         .call(move |conn| {
             conn.execute(
-                "INSERT INTO push_tokens (user_id, platform, token, updated_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(user_id, token) DO UPDATE SET platform = ?2, updated_at = ?4",
-                rusqlite::params![me, req.platform, req.token, now()],
+                "DELETE FROM push_tokens WHERE user_id = ?1 AND token = ?2",
+                rusqlite::params![me, req.token],
             )?;
             Ok(())
         })

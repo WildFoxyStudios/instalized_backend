@@ -140,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         // notifications / push
         .route("/v1/notifications", get(notifications::list))
         .route("/v1/push/register", post(notifications::register_push))
+        .route("/v1/push/unregister", post(notifications::unregister_push))
         .layer(cors)
         // Metadata-only API: media bytes never come here. 64 KiB is generous.
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
