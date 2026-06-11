@@ -1,0 +1,33 @@
+# Fly.io deployment — free tier profile (see DEPLOYMENT.md, Phase 4).
+# Replace `app` with your app name after `fly launch --no-deploy`.
+app = "hybrid-social-backend"
+primary_region = "mia"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATABASE_PATH = "/data/app.db"
+  # Set secrets with: fly secrets set JWT_SECRET=... PINNING_TOKEN=... GOOGLE_CLIENT_ID=...
+  # WEB_BASE_URL / GATEWAYS / PINNING_API_URL are plain env — edit here.
+  WEB_BASE_URL = "https://your-app.vercel.app"
+  GATEWAYS = "https://ipfs.io,https://cloudflare-ipfs.com,https://gateway.pinata.cloud"
+  PINNING_API_URL = "https://api.pinata.cloud/psa"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # WS connections die if the machine stops; with min=0 the free tier sleeps when idle
+  # and cold-starts on the next request (~300 ms). Clients reconnect with backoff.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

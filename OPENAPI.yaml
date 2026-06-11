@@ -1,0 +1,839 @@
+openapi: 3.0.3
+info:
+  title: Hybrid Social — Coordination API
+  version: 1.0.0
+  description: |
+    Central coordination server for the hybrid Web2/Web3 social network.
+    **This API stores metadata + content hashes (CIDs) only — media bytes never
+    transit this server.** Clients compress media locally, upload it directly to
+    the P2P network / pinning provider, then announce the resulting CID here.
+
+    ### Realtime (WebSocket)
+    `GET /v1/ws` upgrades to a WebSocket. First frame MUST be
+    `{"v":1,"type":"auth","data":{"token":"<access JWT>"}}` (5 s budget).
+    Envelope: `{"v":1,"type":string,"data":object}`.
+
+    | type | direction | data |
+    |---|---|---|
+    | auth / auth.ok / auth.err | c→s / s→c | {token} / {user_id} / {error} |
+    | dm.new | both | client: {to_user_id?|thread_id?, body, media_cid?} · server: DmMessage |
+    | dm.ack | s→c | DmMessage (echo to sender) |
+    | dm.read | both | {thread_id, upto_id, by?} |
+    | notif | s→c | {kind, actor_id, post_id, created_at} |
+    | live.start / live.end | s→c | {stream_id, host_id?, title?} |
+    | live.join / live.leave | c→s | {stream_id} |
+    | live.joined | s→c | {stream_id} |
+    | live.chunk | both | {stream_id, seq, cid, duration_ms} (host announces → room fan-out) |
+    | ping / pong | both | {} |
+
+    Clients close the socket (code 1000, reason "bg") the moment they enter
+    background; missed events are re-fetched over REST on resume.
+  contact:
+    name: Engineering
+servers:
+  - url: http://localhost:8080
+    description: local dev
+  - url: https://{app}.fly.dev
+    description: Fly.io deployment
+    variables:
+      app:
+        default: hybrid-social-backend
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+  - name: users
+  - name: feed
+  - name: posts
+  - name: stories
+  - name: dm
+  - name: live
+  - name: media
+  - name: notifications
+  - name: seo
+  - name: system
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Liveness + DB read check
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+
+  /s/{postId}:
+    get:
+      tags: [seo]
+      summary: Share link (SEO interceptor)
+      description: |
+        Crawler User-Agents receive minimal HTML with og: meta resolved through
+        public IPFS gateways; human User-Agents receive a 307 redirect to the
+        web app deep link. No cloaking — same content, minus the app shell.
+      security: []
+      parameters:
+        - { name: postId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "og: HTML (crawlers)", content: { text/html: { schema: { type: string } } } }
+        "307": { description: Redirect to web deep link (humans) }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Email + password registration
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, username, password]
+              properties:
+                email: { type: string, format: email }
+                username: { type: string, pattern: "^[a-z0-9._]{3,30}$" }
+                password: { type: string, minLength: 8 }
+      responses:
+        "200": { $ref: "#/components/responses/TokenPair" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { description: email or username taken, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Email + password login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/TokenPair" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/google:
+    post:
+      tags: [auth]
+      summary: Google id_token sign-in (verified against Google JWKS)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_token]
+              properties:
+                id_token: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/TokenPair" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: GOOGLE_CLIENT_ID not configured }
+
+  /v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token (single-use) and mint a new pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/TokenPair" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200": { description: revoked, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+  /v1/users/me:
+    get:
+      tags: [users]
+      summary: Own profile
+      responses:
+        "200": { $ref: "#/components/responses/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      tags: [users]
+      summary: Edit profile (CID-only avatar)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, maxLength: 80 }
+                bio: { type: string, maxLength: 500 }
+                avatar_cid: { type: string }
+                is_private: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/Profile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/users/{username}:
+    get:
+      tags: [users]
+      summary: Public profile (anonymous allowed — SSR/SEO path)
+      security: []
+      parameters:
+        - { name: username, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/Profile" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/users/{username}/posts:
+    get:
+      tags: [users]
+      summary: Profile grid (keyset). Private accounts return locked=true for non-followers.
+      security: []
+      parameters:
+        - { name: username, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: grid page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  locked: { type: boolean }
+                  items: { type: array, items: { $ref: "#/components/schemas/Post" } }
+                  next_cursor: { type: string, nullable: true }
+
+  /v1/users/{id}/follow:
+    put:
+      tags: [users]
+      summary: Follow a user
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: following, content: { application/json: { schema: { type: object, properties: { following: { type: boolean } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [users]
+      summary: Unfollow a user
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: unfollowed, content: { application/json: { schema: { type: object, properties: { following: { type: boolean } } } } } }
+
+  /v1/feed:
+    get:
+      tags: [feed]
+      summary: Home feed (followed authors + self, keyset pagination)
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/PostPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/reels:
+    get:
+      tags: [feed]
+      summary: Global vertical-video feed (kind=reel, public accounts)
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200": { $ref: "#/components/responses/PostPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/posts:
+    post:
+      tags: [posts]
+      summary: Create a post by announcing its media CID
+      description: Media is already on the P2P network; this records metadata and enqueues a pin job (durability floor).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, media_cid]
+              properties:
+                kind: { type: string, enum: [image, video, reel] }
+                media_cid: { type: string }
+                thumb_cid: { type: string }
+                width: { type: integer }
+                height: { type: integer }
+                duration_ms: { type: integer }
+                caption: { type: string, maxLength: 2200 }
+      responses:
+        "200": { $ref: "#/components/responses/PostResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/posts/{id}:
+    get:
+      tags: [posts]
+      summary: Read a post (anonymous allowed — SSR/SEO path)
+      security: []
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { $ref: "#/components/responses/PostResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [posts]
+      summary: Soft-delete own post
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: boolean } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/posts/{id}/like:
+    put:
+      tags: [posts]
+      summary: Like (idempotent; counter is write-batched)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: liked, content: { application/json: { schema: { type: object, properties: { liked: { type: boolean } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [posts]
+      summary: Unlike
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: unliked, content: { application/json: { schema: { type: object, properties: { liked: { type: boolean } } } } } }
+
+  /v1/posts/{id}/comments:
+    get:
+      tags: [posts]
+      summary: List comments (anonymous allowed, keyset)
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: comment page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Comment" } }
+                  next_cursor: { type: string, nullable: true }
+    post:
+      tags: [posts]
+      summary: Comment on a post
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        "200":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  post_id: { type: string }
+                  body: { type: string }
+                  created_at: { type: integer, format: int64 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/stories:
+    post:
+      tags: [stories]
+      summary: Publish a 24 h story (hard-deleted by the TTL sweeper)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [media_cid]
+              properties:
+                media_cid: { type: string }
+                thumb_cid: { type: string }
+                ttl_secs: { type: integer, description: "test hook; clamped to 24 h" }
+      responses:
+        "200":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  media_cid: { type: string }
+                  thumb_cid: { type: string, nullable: true }
+                  created_at: { type: integer, format: int64 }
+                  expires_at: { type: integer, format: int64 }
+
+  /v1/stories/feed:
+    get:
+      tags: [stories]
+      summary: Active stories from followed users + self
+      responses:
+        "200":
+          description: stories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Story" } }
+
+  /v1/dm/threads:
+    get:
+      tags: [dm]
+      summary: Thread list with peers, previews and unread counts
+      responses:
+        "200":
+          description: threads
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/DmThread" } }
+    post:
+      tags: [dm]
+      summary: Get-or-create the 1:1 thread with a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string }
+      responses:
+        "200":
+          description: thread
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  peer_id: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/dm/threads/{id}/messages:
+    get:
+      tags: [dm]
+      summary: Message history (keyset, newest first)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/DmMessage" } }
+                  next_cursor: { type: string, nullable: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [dm]
+      summary: Send a message (recipient also receives it over WS)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body: { type: string, maxLength: 4000 }
+                media_cid: { type: string }
+      responses:
+        "200": { description: sent, content: { application/json: { schema: { $ref: "#/components/schemas/DmMessage" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/dm/threads/{id}/read:
+    post:
+      tags: [dm]
+      summary: Mark messages read up to an id (peer gets dm.read over WS)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [upto_id]
+              properties:
+                upto_id: { type: string }
+      responses:
+        "200": { description: count marked, content: { application/json: { schema: { type: object, properties: { read: { type: integer } } } } } }
+
+  /v1/live:
+    post:
+      tags: [live]
+      summary: Start a live stream (online followers get live.start over WS)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 120 }
+      responses:
+        "200":
+          description: stream created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveStream" }
+
+  /v1/live/{id}:
+    get:
+      tags: [live]
+      summary: Stream metadata + full chunk playlist (late-join catch-up / VOD)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: stream + playlist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stream: { $ref: "#/components/schemas/LiveStream" }
+                  chunks: { type: array, items: { $ref: "#/components/schemas/LiveChunk" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/live/{id}/chunk:
+    post:
+      tags: [live]
+      summary: Announce a 3 s chunk CID (host only; REST fallback for WS live.chunk)
+      description: The FIRST chunk of a stream triggers an immediate pin job (durable origin for late joiners).
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq, cid]
+              properties:
+                seq: { type: integer, minimum: 0 }
+                cid: { type: string }
+                duration_ms: { type: integer, default: 3000 }
+      responses:
+        "200": { description: accepted + fanned out, content: { application/json: { schema: { $ref: "#/components/schemas/LiveChunk" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/live/{id}/end:
+    post:
+      tags: [live]
+      summary: End the stream (room receives live.end; room closes)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: ended, content: { application/json: { schema: { type: object, properties: { status: { type: string } } } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/media/announce:
+    post:
+      tags: [media]
+      summary: Announce a CID for pinning (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid]
+              properties:
+                cid: { type: string }
+                kind: { type: string, maxLength: 32, default: media }
+      responses:
+        "200": { description: pin job state, content: { application/json: { schema: { $ref: "#/components/schemas/PinJob" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/media/pins/{cid}:
+    get:
+      tags: [media]
+      summary: Pin job status for a CID
+      parameters: [{ name: cid, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: pin job, content: { application/json: { schema: { $ref: "#/components/schemas/PinJob" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/media/upload-token:
+    get:
+      tags: [media]
+      summary: Scoped upload credential for browser/device→provider direct uploads
+      responses:
+        "200":
+          description: credential
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { type: string, example: pinata }
+                  endpoint: { type: string, example: "https://api.pinata.cloud/pinning/pinFileToIPFS" }
+                  jwt: { type: string }
+        "503": { description: PINATA_UPLOAD_JWT not configured }
+
+  /v1/notifications:
+    get:
+      tags: [notifications]
+      summary: Activity feed (keyset)
+      parameters:
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+                  next_cursor: { type: string, nullable: true }
+
+  /v1/push/register:
+    post:
+      tags: [notifications]
+      summary: Register a push token (FCM/APNs) for background delivery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform, token]
+              properties:
+                platform: { type: string, enum: [android, ios, web] }
+                token: { type: string }
+      responses:
+        "200": { description: stored, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "JWT (HS256, 15 min TTL)"
+  parameters:
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: "Keyset cursor `created_at,id` from the previous page's next_cursor"
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 20, maximum: 50 }
+  responses:
+    TokenPair:
+      description: Token pair (rotating refresh)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              access_token: { type: string }
+              refresh_token: { type: string }
+              token_type: { type: string, example: Bearer }
+              expires_in: { type: integer, example: 900 }
+              user_id: { type: string }
+    Profile:
+      description: User profile
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Profile" }
+    PostResponse:
+      description: Post
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Post" }
+    PostPage:
+      description: Page of posts
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              items: { type: array, items: { $ref: "#/components/schemas/Post" } }
+              next_cursor: { type: string, nullable: true }
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing/invalid credentials
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not allowed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    Author:
+      type: object
+      properties:
+        id: { type: string }
+        username: { type: string }
+        display_name: { type: string, nullable: true }
+        avatar_cid: { type: string, nullable: true }
+    Post:
+      type: object
+      properties:
+        id: { type: string, description: ULID }
+        author: { $ref: "#/components/schemas/Author" }
+        kind: { type: string, enum: [image, video, reel] }
+        media_cid: { type: string, description: "IPFS CID — resolve via any gateway" }
+        thumb_cid: { type: string, nullable: true }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        duration_ms: { type: integer, nullable: true }
+        caption: { type: string }
+        like_count: { type: integer }
+        comment_count: { type: integer }
+        created_at: { type: integer, format: int64, description: unix seconds }
+        liked_by_me: { type: boolean }
+    Profile:
+      type: object
+      properties:
+        id: { type: string }
+        username: { type: string }
+        display_name: { type: string, nullable: true }
+        bio: { type: string }
+        avatar_cid: { type: string, nullable: true }
+        is_private: { type: boolean }
+        created_at: { type: integer, format: int64 }
+        counts:
+          type: object
+          properties:
+            posts: { type: integer }
+            followers: { type: integer }
+            following: { type: integer }
+        is_following: { type: boolean }
+        is_me: { type: boolean }
+    Comment:
+      type: object
+      properties:
+        id: { type: string }
+        body: { type: string }
+        created_at: { type: integer, format: int64 }
+        author: { $ref: "#/components/schemas/Author" }
+    Story:
+      type: object
+      properties:
+        id: { type: string }
+        media_cid: { type: string }
+        thumb_cid: { type: string, nullable: true }
+        created_at: { type: integer, format: int64 }
+        expires_at: { type: integer, format: int64 }
+        author: { $ref: "#/components/schemas/Author" }
+    DmThread:
+      type: object
+      properties:
+        id: { type: string }
+        peer: { $ref: "#/components/schemas/Author" }
+        last_message: { type: string, nullable: true }
+        last_message_at: { type: integer, format: int64, nullable: true }
+        unread: { type: integer }
+    DmMessage:
+      type: object
+      properties:
+        id: { type: string }
+        thread_id: { type: string }
+        sender_id: { type: string }
+        body: { type: string }
+        media_cid: { type: string, nullable: true }
+        created_at: { type: integer, format: int64 }
+        read_at: { type: integer, format: int64, nullable: true }
+    LiveStream:
+      type: object
+      properties:
+        id: { type: string }
+        host_id: { type: string }
+        title: { type: string }
+        status: { type: string, enum: [live, ended] }
+        started_at: { type: integer, format: int64 }
+        ended_at: { type: integer, format: int64, nullable: true }
+        host: { $ref: "#/components/schemas/Author" }
+    LiveChunk:
+      type: object
+      properties:
+        stream_id: { type: string }
+        seq: { type: integer }
+        cid: { type: string }
+        duration_ms: { type: integer }
+    PinJob:
+      type: object
+      properties:
+        cid: { type: string }
+        kind: { type: string }
+        status: { type: string, enum: [pending, pinned, failed] }
+        attempts: { type: integer }
+        created_at: { type: integer, format: int64 }
+        pinned_at: { type: integer, format: int64, nullable: true }
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [like, comment, follow] }
+        post_id: { type: string, nullable: true }
+        created_at: { type: integer, format: int64 }
+        read_at: { type: integer, format: int64, nullable: true }
+        actor: { $ref: "#/components/schemas/Author" }
