@@ -29,7 +29,10 @@ async fn main() {
     tracing::info!("backend-rust listening on {addr}");
 
     let shutdown_state = state.clone();
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down — flushing counter batches");

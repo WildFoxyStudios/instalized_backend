@@ -389,3 +389,32 @@ async fn public_reads_without_token() {
     assert_eq!(status, 200);
     assert_eq!(v["jwt"], "scoped-jwt");
 }
+
+#[tokio::test]
+async fn auth_rate_limit_returns_429() {
+    let app = common::spawn(|c| c.auth_rate_per_min = 3).await;
+    let attempt = |ip: &'static str| {
+        let app = &app;
+        async move {
+            app.http
+                .post(format!("{}/v1/auth/login", app.base))
+                .header("fly-client-ip", ip)
+                .json(&json!({"email": "nobody@x.com", "password": "wrong-password"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    // Capacity 3: failures still consume tokens.
+    for i in 0..3 {
+        assert_eq!(attempt("9.9.9.9").await, 401, "attempt {i}");
+    }
+    assert_eq!(attempt("9.9.9.9").await, 429, "fourth call is limited");
+    // Independent bucket per IP.
+    assert_eq!(attempt("8.8.8.8").await, 401);
+    // Non-auth routes are unaffected.
+    let (status, _) = app.get("/healthz", None).await;
+    assert_eq!(status, 200);
+}

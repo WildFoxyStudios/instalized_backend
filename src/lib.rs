@@ -28,12 +28,14 @@ pub fn build(cfg: Config) -> AppResult<(axum::Router, AppState)> {
         .pinning_api_url
         .clone()
         .map(|url| PinningClient::new(url, cfg.pinning_token.clone()));
+    let limiter = Arc::new(api::ratelimit::RateLimiter::per_minute(cfg.auth_rate_per_min));
     let state = AppState {
         cfg: Arc::new(cfg),
         db,
         hub: Arc::new(Hub::default()),
         google: Arc::new(google),
         pinner: Arc::new(pinner),
+        limiter,
     };
     Ok((api::router(state.clone()), state))
 }

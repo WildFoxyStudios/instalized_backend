@@ -81,8 +81,8 @@ pub async fn register(
         return Err(AppError::bad_request("invalid email"));
     }
     let username = validate_username(&req.username)?;
-    if req.password.len() < 8 {
-        return Err(AppError::bad_request("password must be at least 8 chars"));
+    if req.password.len() < 8 || req.password.len() > 128 {
+        return Err(AppError::bad_request("password must be 8-128 chars"));
     }
     let hash = password::hash_blocking(req.password).await?;
     let user_id = new_id();

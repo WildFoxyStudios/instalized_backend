@@ -22,6 +22,8 @@ pub struct Config {
     pub pin_worker_secs: u64,
     pub access_ttl_secs: i64,
     pub refresh_ttl_secs: i64,
+    /// Auth-surface rate limit (per IP per minute) — spec §15.
+    pub auth_rate_per_min: u32,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -58,6 +60,7 @@ impl Config {
             pin_worker_secs: env_or("PIN_WORKER_SECS", "5").parse().unwrap_or(5),
             access_ttl_secs: 15 * 60,
             refresh_ttl_secs: 30 * 24 * 3600,
+            auth_rate_per_min: env_or("AUTH_RATE_PER_MIN", "10").parse().unwrap_or(10),
         }
     }
 

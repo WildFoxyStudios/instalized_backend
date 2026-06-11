@@ -8,6 +8,7 @@ pub mod live;
 pub mod media;
 pub mod notifications;
 pub mod posts;
+pub mod ratelimit;
 pub mod stories;
 pub mod users;
 
@@ -29,16 +30,23 @@ pub fn router(state: AppState) -> Router {
     .allow_methods(Any)
     .allow_headers(Any);
 
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/s/{post_id}", get(crate::seo::share_page::share))
-        .route("/v1/ws", get(crate::ws::session::ws_handler))
-        // auth
+    // Auth surface gets its own per-IP rate limit (spec §15).
+    let auth_routes = Router::new()
         .route("/v1/auth/register", post(auth::register))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/google", post(auth::google))
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/auth/logout", post(auth::logout))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ratelimit::limit_auth,
+        ));
+
+    Router::new()
+        .merge(auth_routes)
+        .route("/healthz", get(healthz))
+        .route("/s/{post_id}", get(crate::seo::share_page::share))
+        .route("/v1/ws", get(crate::ws::session::ws_handler))
         // users
         .route("/v1/users/me", get(users::get_me).patch(users::patch_me))
         .route("/v1/users/{username}", get(users::get_user))
@@ -90,6 +98,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/notifications", get(notifications::list))
         .route("/v1/push/register", post(notifications::register_push))
         .layer(cors)
+        // Metadata-only API: media bytes never come here. 64 KiB is generous.
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 

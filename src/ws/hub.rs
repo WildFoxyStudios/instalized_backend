@@ -7,9 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+/// (connection id, outbound queue) — one per live socket of a user.
+type Conn = (u64, mpsc::UnboundedSender<String>);
+
 #[derive(Default)]
 pub struct Hub {
-    clients: RwLock<HashMap<String, Vec<(u64, mpsc::UnboundedSender<String>)>>>,
+    clients: RwLock<HashMap<String, Vec<Conn>>>,
     rooms: RwLock<HashMap<String, HashSet<String>>>,
     next_conn: AtomicU64,
 }

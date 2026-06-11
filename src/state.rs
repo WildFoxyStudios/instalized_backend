@@ -1,5 +1,6 @@
 //! Shared application state (cheap to clone — everything is Arc'd).
 
+use crate::api::ratelimit::RateLimiter;
 use crate::auth::google::GoogleVerifier;
 use crate::config::Config;
 use crate::db::Db;
@@ -14,4 +15,5 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub google: Arc<Option<GoogleVerifier>>,
     pub pinner: Arc<Option<PinningClient>>,
+    pub limiter: Arc<RateLimiter>,
 }

@@ -12,7 +12,9 @@ use serde_json::json;
 use std::time::Duration;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle(socket, state))
+    ws.max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| handle(socket, state))
 }
 
 async fn handle(socket: WebSocket, state: AppState) {

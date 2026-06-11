@@ -5,6 +5,9 @@ use backend_rust::config::Config;
 use backend_rust::state::AppState;
 use serde_json::Value;
 
+// Each integration binary uses a subset of this harness — silence cross-target
+// dead-code noise.
+#[allow(dead_code)]
 pub struct TestApp {
     pub base: String,
     pub http: reqwest::Client,
@@ -29,6 +32,7 @@ pub async fn spawn(modify: impl FnOnce(&mut Config)) -> TestApp {
         pin_worker_secs: 1,
         access_ttl_secs: 900,
         refresh_ttl_secs: 3600,
+        auth_rate_per_min: 1000, // generous default so unrelated tests never trip it
     };
     modify(&mut cfg);
     let (app, state) = backend_rust::build(cfg).unwrap();
@@ -36,7 +40,12 @@ pub async fn spawn(modify: impl FnOnce(&mut Config)) -> TestApp {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     TestApp {
         base: format!("http://{addr}"),
@@ -48,6 +57,7 @@ pub async fn spawn(modify: impl FnOnce(&mut Config)) -> TestApp {
     }
 }
 
+#[allow(dead_code)]
 impl TestApp {
     pub fn ws_url(&self) -> String {
         format!("ws{}/v1/ws", self.base.trim_start_matches("http"))
